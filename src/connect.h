@@ -41,7 +41,7 @@ enum {
   E_HOST = -100
 };
 int connect_to_host (const char *, int);
-int connect_to_ip (const ip_address *, int, const char *);
+int connect_to_ip (const ip_address *, int, const char *, bool);
 
 int bind_local (const ip_address *, int *);
 int accept_connection (int);

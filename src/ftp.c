@@ -870,7 +870,7 @@ Error in server response, closing control connection.\n"));
             {
               DEBUGP (("trying to connect to %s port %d\n",
                       print_address (&passive_addr), passive_port));
-              dtsock = connect_to_ip (&passive_addr, passive_port, NULL);
+              dtsock = connect_to_ip (&passive_addr, passive_port, NULL, false);
               if (dtsock < 0)
                 {
                   int save_errno = errno;

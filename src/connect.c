@@ -36,8 +36,13 @@ as that of the covered work.  */
 #include <unistd.h>
 #include <assert.h>
 
+#include <arpa/inet.h>
+
 #include <sys/socket.h>
 #include <sys/select.h>
+
+#include <fcntl.h>
+#include <errno.h>
 
 #ifndef WINDOWS
 # ifdef __VMS
@@ -262,7 +267,7 @@ connect_with_timeout (int fd, const struct sockaddr *addr, socklen_t addrlen,
    connecting to.  */
 
 int
-connect_to_ip (const ip_address *ip, int port, const char *print)
+connect_to_ip (const ip_address *ip, int port, const char *print, bool nonblocking)
 {
   struct sockaddr_storage ss;
   struct sockaddr *sa = (struct sockaddr *)&ss;
@@ -351,10 +356,30 @@ connect_to_ip (const ip_address *ip, int port, const char *print)
         }
     }
 
+  if (nonblocking){
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+  }
+
   /* Connect the socket to the remote endpoint.  */
-  if (connect_with_timeout (sock, sa, sockaddr_size (sa),
-                            opt.connect_timeout) < 0)
+  if (nonblocking){
+    int rt = connect(sock ,sa, sockaddr_size(sa));
+    if (rt < 0 && errno != EINPROGRESS)
+    {
+        //printf("error %d\n", rt);
+        //perror("connect failed. Error");
+        goto err;
+    }
+    assert (sock >= 0);
+    DEBUGP (("Created nonblocking socket %d.\n", sock));
+    return sock;
+  }
+  else{
+    if (connect_with_timeout (sock, sa, sockaddr_size (sa),
+                              opt.connect_timeout) < 0)
     goto err;
+  }
+
 
   /* Success. */
   assert (sock >= 0);
@@ -401,23 +426,86 @@ connect_to_host (const char *host, int port)
     }
 
   address_list_get_bounds (al, &start, &end);
+  /*
+  for (i = start; i < end; i++)
+    {
+    const ip_address *ip = address_list_address_at (al, i);
+    printf("get IP %s", print_address(ip));
+    }
+  */
+  struct timeval tv;
+  tv.tv_sec = 2;
+  tv.tv_usec = 500000;
+  fd_set writefds;
+  FD_ZERO(&writefds);
+  int maxfd = 0;
+  int fds[20]; // try at most 20 IP addresses together, need improvement
+
   for (i = start; i < end; i++)
     {
       const ip_address *ip = address_list_address_at (al, i);
-      sock = connect_to_ip (ip, port, host);
+      sock = connect_to_ip (ip, port, host, true);
       if (sock >= 0)
         {
           /* Success. */
-          address_list_set_connected (al);
-          address_list_release (al);
-          return sock;
+          //address_list_set_connected (al);
+          //address_list_release (al);
+          //return sock;
+          maxfd = maxfd<sock?sock:maxfd;
+          FD_SET(sock, &writefds);
+          if (i - start < 20)
+            fds[i-start] = sock; // store the fds
+          else
+            break;
         }
-
-      /* The attempt to connect has failed.  Continue with the loop
-         and try next address. */
-
-      address_list_set_faulty (al, i);
+      else
+        {
+          /* The attempt to connect has failed.  Continue with the loop
+          and try next address. */
+          //address_list_set_faulty (al, i);
+        }
     }
+  if (maxfd != 0)
+    { //not all socks are failed
+      int retval = select(maxfd+1, NULL, &writefds, NULL, &tv);
+      int first_sock = -1;
+      ip_address *first_ip;
+      if (retval == -1)
+        perror("select()");
+      else if (retval) //a sock is connected
+        { 
+          for (i = start; i < start+20 && i < end; i++)
+            {
+              if (FD_ISSET(fds[i-start], &writefds)) //find it
+                {
+                  first_sock = fds[i-start];
+                  first_ip = address_list_address_at (al, i);
+                  break;
+                }
+
+            }
+          for (i = start; i < start+20 && i < end; i++) //close the rest
+            {
+              if (fds[i-start] != first_sock)
+                {
+                  close(fds[i-start]);
+                }
+
+            }
+          if (first_sock > 0) // if really find one
+            {
+                int flags = fcntl(first_sock, F_GETFL, 0);
+                fcntl(first_sock, F_SETFL, flags & (~O_NONBLOCK) ); //set sock to be blocked
+                printf("first IP is %s", print_address(first_ip));
+                address_list_set_connected (al);
+                address_list_release (al);
+                return first_sock;
+            }
+        }
+      else
+        perror("No connection within 2.5 seconds.\n");
+    }
+  
 
   /* Failed to connect to any of the addresses in AL. */
 
