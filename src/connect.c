@@ -80,6 +80,9 @@ as that of the covered work.  */
 # endif
 #endif /* ENABLE_IPV6 */
 
+#define likely(x)      __builtin_expect(!!(x), 1)
+#define unlikely(x)    __builtin_expect(!!(x), 0)
+
 /* Fill SA as per the data in IP and PORT.  SA shoult point to struct
    sockaddr_storage if ENABLE_IPV6 is defined, to struct sockaddr_in
    otherwise.  */
@@ -275,7 +278,7 @@ connect_to_ip (const ip_address *ip, int port, const char *print, bool nonblocki
 
   /* If PRINT is non-NULL, print the "Connecting to..." line, with
      PRINT being the host name we're connecting to.  */
-  if (print)
+  if (!nonblocking && print)
     {
       const char *txt_addr = print_address (ip);
       if (0 != strcmp (print, txt_addr))
@@ -316,7 +319,7 @@ connect_to_ip (const ip_address *ip, int port, const char *print, bool nonblocki
     goto err;
 
 #if defined(ENABLE_IPV6) && defined(IPV6_V6ONLY)
-  if (opt.ipv6_only) {
+  if (!nonblocking && opt.ipv6_only) {
     int on = 1;
     /* In case of error, we will go on anyway... */
     int err = setsockopt (sock, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof (on));
@@ -330,7 +333,7 @@ connect_to_ip (const ip_address *ip, int port, const char *print, bool nonblocki
      hopefully, the kernel's TCP window size) to the per-second limit.
      That way we should never have to sleep for more than 1s between
      network reads.  */
-  if (opt.limit_rate && opt.limit_rate < 8192)
+  if (!nonblocking && opt.limit_rate && opt.limit_rate < 8192)
     {
       int bufsize = opt.limit_rate;
       if (bufsize < 512)
@@ -343,7 +346,7 @@ connect_to_ip (const ip_address *ip, int port, const char *print, bool nonblocki
          for POST, we should also set SO_SNDBUF here.  */
     }
 
-  if (opt.bind_address)
+  if (!nonblocking && opt.bind_address)
     {
       /* Bind the client side of the socket to the requested
          address.  */
@@ -364,7 +367,7 @@ connect_to_ip (const ip_address *ip, int port, const char *print, bool nonblocki
   /* Connect the socket to the remote endpoint.  */
   if (nonblocking){
     int rt = connect(sock ,sa, sockaddr_size(sa));
-    if (rt < 0 && errno != EINPROGRESS)
+    if (unlikely(rt < 0 && errno != EINPROGRESS))
     {
         //printf("error %d\n", rt);
         //perror("connect failed. Error");
@@ -434,27 +437,40 @@ connect_to_host (const char *host, int port)
     }
   */
   struct timeval tv;
-  tv.tv_sec = 2;
-  tv.tv_usec = 500000;
+  tv.tv_sec = 10;
+  tv.tv_usec = 0;
   fd_set writefds;
   FD_ZERO(&writefds);
-  int maxfd = 0;
-  int fds[20]; // try at most 20 IP addresses together, need improvement
+  int maxfd = -1;
+  int fds[10]; // try at most 10 IP addresses together, need improvement
 
-  for (i = start; i < end; i++)
+  for (i = 0; i < end-start; i++)
     {
-      const ip_address *ip = address_list_address_at (al, i);
-      sock = connect_to_ip (ip, port, host, true);
-      if (sock >= 0)
+      const ip_address *ip = address_list_address_at(al, i+start);
+      //sock = connect_to_ip (ip, port, host, true);
+      struct sockaddr_storage ss;
+      struct sockaddr *sa = (struct sockaddr *)&ss;
+      int sock;
+      sockaddr_set_data (sa, ip, port);
+      sock = socket (sa->sa_family, SOCK_STREAM, 0);
+      //int flags = fcntl(sock, F_GETFL, 0);
+      fcntl(sock, F_SETFL, O_NONBLOCK);
+      int rt = connect(sock ,sa, sockaddr_size(sa));
+      if (unlikely(errno != EINPROGRESS && rt < 0))
+      {
+          //printf("error %d\n", rt);
+          perror("connect failed. Error");
+          continue;
+      }
+      if (likely(sock >= 0))
         {
           /* Success. */
-          //address_list_set_connected (al);
-          //address_list_release (al);
-          //return sock;
-          maxfd = maxfd<sock?sock:maxfd;
-          FD_SET(sock, &writefds);
-          if (i - start < 20)
-            fds[i-start] = sock; // store the fds
+        if (likely(i < 2))
+          {
+            maxfd = maxfd<sock?sock:maxfd;
+            FD_SET(sock, &writefds);
+            fds[i] = sock; // store the fds
+          }
           else
             break;
         }
@@ -465,38 +481,33 @@ connect_to_host (const char *host, int port)
           //address_list_set_faulty (al, i);
         }
     }
-  if (maxfd != 0)
+  if (likely(maxfd >= 0))
     { //not all socks are failed
       int retval = select(maxfd+1, NULL, &writefds, NULL, &tv);
       int first_sock = -1;
-      ip_address *first_ip;
-      if (retval == -1)
+      //ip_address *first_ip;
+      if (unlikely(retval == -1))
         perror("select()");
-      else if (retval) //a sock is connected
+      else if (likely(retval)) //a sock is connected
         { 
-          for (i = start; i < start+20 && i < end; i++)
+          for (i = 0; i < 2 && i < end-start; i++)
             {
-              if (FD_ISSET(fds[i-start], &writefds)) //find it
+              if (unlikely(FD_ISSET(fds[i], &writefds))) //find it
                 {
-                  first_sock = fds[i-start];
-                  first_ip = address_list_address_at (al, i);
-                  break;
+                  first_sock = fds[i];
+                  //first_ip = address_list_address_at (al, i);
                 }
-
-            }
-          for (i = start; i < start+20 && i < end; i++) //close the rest
-            {
-              if (fds[i-start] != first_sock)
+              else
                 {
-                  close(fds[i-start]);
+                  close(fds[i]);
                 }
-
             }
-          if (first_sock > 0) // if really find one
+
+          if (unlikely(first_sock >= 0)) // if really find one
             {
                 int flags = fcntl(first_sock, F_GETFL, 0);
                 fcntl(first_sock, F_SETFL, flags & (~O_NONBLOCK) ); //set sock to be blocked
-                printf("first IP is %s", print_address(first_ip));
+                //printf("first IP is %s", print_address(first_ip));
                 address_list_set_connected (al);
                 address_list_release (al);
                 return first_sock;
