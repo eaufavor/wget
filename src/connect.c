@@ -68,6 +68,7 @@ as that of the covered work.  */
 #include "host.h"
 #include "connect.h"
 #include "hash.h"
+#include <sys/epoll.h>
 
 #include <stdint.h>
 
@@ -436,15 +437,18 @@ connect_to_host (const char *host, int port)
     printf("get IP %s", print_address(ip));
     }
   */
-  struct timeval tv;
-  tv.tv_sec = 10;
-  tv.tv_usec = 0;
-  fd_set writefds;
-  FD_ZERO(&writefds);
-  int maxfd = -1;
+  //struct timeval tv;
+  //tv.tv_sec = 10;
+  //tv.tv_usec = 0;
+  //fd_set writefds;
+  //FD_ZERO(&writefds);
+  //int maxfd = -1;
   int fds[10]; // try at most 10 IP addresses together, need improvement
+  int epfd = epoll_create(1);
+  struct epoll_event ev;
+  struct epoll_event evlist[1];
 
-  for (i = 0; i < end-start; i++)
+  for (i = 0; i < 5 && i < end-start; i++)
     {
       const ip_address *ip = address_list_address_at(al, i+start);
       //sock = connect_to_ip (ip, port, host, true);
@@ -458,21 +462,19 @@ connect_to_host (const char *host, int port)
       int rt = connect(sock ,sa, sockaddr_size(sa));
       if (unlikely(errno != EINPROGRESS && rt < 0))
       {
-          //printf("error %d\n", rt);
           perror("connect failed. Error");
           continue;
       }
       if (likely(sock >= 0))
         {
           /* Success. */
-        if (likely(i < 2))
-          {
-            maxfd = maxfd<sock?sock:maxfd;
-            FD_SET(sock, &writefds);
-            fds[i] = sock; // store the fds
-          }
-          else
-            break;
+          //maxfd = maxfd<sock?sock:maxfd;
+          //FD_SET(sock, &writefds);
+          fds[i] = sock; // store the fds
+          ev.events = EPOLLOUT;            /* Only interested in input events */
+          ev.data.fd = sock;
+          if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev) == -1)
+            perror("epoll error\n");
         }
       else
         {
@@ -481,6 +483,33 @@ connect_to_host (const char *host, int port)
           //address_list_set_faulty (al, i);
         }
     }
+  while (1)
+    {
+      int ready = epoll_wait(epfd, evlist, 1, -1);
+      if (ready == -1) 
+        {
+          if (errno == EINTR)
+            continue;               /* Restart if interrupted by signal */
+          else
+            perror("epoll_wait error/n");
+        }
+      break;
+    }
+  
+  for (i = 0; i < 5 && i < end-start; i++)
+    {
+      if (fds[i] != evlist[0].data.fd)
+        close(fds[i]);
+    }
+  
+  int flags = fcntl(evlist[0].data.fd, F_GETFL, 0);
+  fcntl(evlist[0].data.fd, F_SETFL, flags & (~O_NONBLOCK) );
+  address_list_set_connected(al);
+  address_list_release(al);
+  return evlist[0].data.fd;
+
+
+  /*  
   if (likely(maxfd >= 0))
     { //not all socks are failed
       int retval = select(maxfd+1, NULL, &writefds, NULL, &tv);
@@ -490,7 +519,7 @@ connect_to_host (const char *host, int port)
         perror("select()");
       else if (likely(retval)) //a sock is connected
         { 
-          for (i = 0; i < 2 && i < end-start; i++)
+          for (i = 0; i < 5 && i < end-start; i++)
             {
               if (unlikely(FD_ISSET(fds[i], &writefds))) //find it
                 {
@@ -516,6 +545,7 @@ connect_to_host (const char *host, int port)
       else
         perror("No connection within 2.5 seconds.\n");
     }
+    */
   
 
   /* Failed to connect to any of the addresses in AL. */
