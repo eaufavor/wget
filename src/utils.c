@@ -2434,11 +2434,11 @@ print_decimal (double number)
   if (n >= 9.95)
     /* Cut off at 9.95 because the below %.1f would round 9.96 to
        "10.0" instead of "10".  OTOH 9.94 will print as "9.9".  */
-    snprintf (buf, sizeof buf, "%.0f", number);
+    snprintf (buf, sizeof buf, "%.2f", number);
   else if (n >= 0.95)
-    snprintf (buf, sizeof buf, "%.1f", number);
+    snprintf (buf, sizeof buf, "%.3f", number);
   else if (n >= 0.001)
-    snprintf (buf, sizeof buf, "%.1g", number);
+    snprintf (buf, sizeof buf, "%.3g", number);
   else if (n >= 0.0005)
     /* round [0.0005, 0.001) to 0.001 */
     snprintf (buf, sizeof buf, "%.3f", number);
